@@ -30,7 +30,7 @@ class DepthEngine:
         self,
         input_size: int = 364,
         frame_rate: int = 15,
-        trt_engine_path: str = '/home/jetson/Project/Depth-Anything-for-Jetson-Orin/weights/depth_anything_vits14_364.trt', # Must match with the input_size
+        trt_engine_path: str = '/home/jetson/Project/Depth-Anything-for-Jetson-Orin/exprted_models/depth_anything_vits14_364.trt', # Must match with the input_size, here: xxx_364.trt matches input_size=364
         save_path: str = None,
         raw: bool = False,
         stream: bool = False,
@@ -215,16 +215,18 @@ class DepthEngine:
                 cv2.destroyAllWindows()
             
 if __name__ == '__main__':
-    args = argparse.ArgumentParser()
-    args.add_argument('--frame_rate', type=int, default=30, help='Frame rate of the camera')
-    args.add_argument('--raw', action='store_true', help='Use only the raw depth map')
-    args.add_argument('--stream', action='store_true', help='Stream the results')
-    args.add_argument('--record', action='store_true', help='Record the results')
-    args.add_argument('--save', action='store_true', help='Save the results')
-    args.add_argument('--grayscale', action='store_true', help='Convert the depth map to grayscale')
-    args = args.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--trt_engine_path', type=str, default='./exprted_models/depth_anything_vits14_364.trt', help='path to the TensorRT engine')
+    parser.add_argument('--frame_rate', type=int, default=30, help='Frame rate of the camera')
+    parser.add_argument('--raw', action='store_true', help='Use only the raw depth map')
+    parser.add_argument('--stream', action='store_true', help='Stream the results')
+    parser.add_argument('--record', action='store_true', help='Record the results')
+    parser.add_argument('--save', action='store_true', help='Save the results')
+    parser.add_argument('--grayscale', action='store_true', help='Convert the depth map to grayscale')
+    args = parser.parse_args()
     
     depth = DepthEngine(
+        trt_engine_path=args.trt_engine_path,
         frame_rate=args.frame_rate,
         raw=args.raw,
         stream=args.stream, 
@@ -233,5 +235,3 @@ if __name__ == '__main__':
         grayscale=args.grayscale
     )
     depth.run()
-
-# python depth_realsense.py --stream 

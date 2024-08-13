@@ -29,6 +29,7 @@ def export(
     # Config path
     with open(cfg_path) as f:
         cfg = json.load(f)
+        assert cfg
         
     # 1. Load the model
     # need to install: pip install huggingface_hub
@@ -86,21 +87,15 @@ def export(
         f.write(serialized_engine)
     
 if __name__ == '__main__':
-    # args = argparse.ArgumentParser()
-    # args.add_argument("--weights_path", type=str, default="LiheYoung/depth_anything_vits14")
-    # args.add_argument("--save_path", type=str, default="weights")
-    # args.add_argument("--input_size", type=int, default=406)
-    
-    # export(
-    #     weights_path=args.weights_path,
-    #     save_path=args.save_path,
-    #     input_size=args.input_size,
-    #     onnx=True,
-    # )
+    parser = argparse.ArgumentParser(description='Export script for Depth-Anything-for-Jetson-Orin-Python')
+    parser.add_argument("--weights_path", type=str, default="./ckpt")
+    parser.add_argument("--save_path", type=str, default="exported_models")
+    parser.add_argument("--input_size", type=int, default=364)
+    args = parser.parse_args()
     
     export(
-        model_path="/home/jetson/Project/Depth-Anything-for-Jetson-Orin/ckpt", # local hub or online
-        save_path="weights", # folder name
-        input_size=364, # 308 | 364 | 406 | 518
+        model_path=args.weights_path,
+        save_path=args.save_path,
+        input_size=args.input_size,
         onnx=True,
     )
