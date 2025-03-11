@@ -18,7 +18,7 @@ import pycuda.autoinit # Don't remove this line
 import pycuda.driver as cuda
 from torchvision.transforms import Compose
 
-from camera_realsense import CameraD435i
+from camera import Camera
 from depth_anything import transform
 
 
@@ -28,9 +28,11 @@ class DepthEngine:
     """
     def __init__(
         self,
+        sensor_id: int | Sequence[int] = 0,
+        camera_type: str = "usb",
         input_size: int = 364,
-        frame_rate: int = 15,
-        trt_engine_path: str = '/home/jetson/Project/Depth-Anything-for-Jetson-Orin/exprted_models/depth_anything_vits14_364.trt', # Must match with the input_size, here: xxx_364.trt matches input_size=364
+        frame_rate: int = 30,
+        trt_engine_path: str = "/home/jetson/Project/Depth-Anything-for-Jetson-Orin-Python-main/exported_models/depth_anything_vits14_364.trt", # Must match with the input_size
         save_path: str = None,
         raw: bool = False,
         stream: bool = False,
@@ -39,6 +41,7 @@ class DepthEngine:
         grayscale: bool = False,
     ):
         """
+        sensor_id: int | Sequence[int] -> Camera sensor id
         input_size: int -> Width and height of the input tensor(e.g. 308, 364, 406, 518)
         frame_rate: int -> Frame rate of the camera(depending on inference time)
         trt_engine_path: str -> Path to the TensorRT engine
@@ -50,11 +53,16 @@ class DepthEngine:
         grayscale: bool -> Convert the depth map to grayscale
         """
         # Initialize the camera
-        self.camera = CameraD435i(stream=True, frame_rate=frame_rate)
+        self.camera = Camera(
+            sensor_id=sensor_id,
+            camera_type=camera_type,
+            frame_rate=frame_rate,
+            capture_width=640,
+            capture_height=480)
         self.width = input_size # width of the input tensor
         self.height = input_size # height of the input tensor
-        self._width = self.camera._width # width of the camera frame
-        self._height = self.camera._height # height of the camera frame
+        self._width = self.camera.capture_width # width of the camera frame
+        self._height = self.camera.capture_height # height of the camera frame
         self.save_path = Path(save_path) if isinstance(save_path, str) else Path("results")
         self.raw = raw
         self.stream = stream
@@ -73,11 +81,11 @@ class DepthEngine:
         self.context = self.engine.create_execution_context()
         print(f"Engine loaded from {trt_engine_path}")
         
-        # Allocate pagelocked memory (host: CPU)
+        # Allocate pagelocked memory
         self.h_input = cuda.pagelocked_empty(trt.volume((1, 3, self.width, self.height)), dtype=np.float32)
         self.h_output = cuda.pagelocked_empty(trt.volume((1, 1, self.width, self.height)), dtype=np.float32)
         
-        # Allocate device memory (device: GPU)
+        # Allocate device memory
         self.d_input = cuda.mem_alloc(self.h_input.nbytes)
         self.d_output = cuda.mem_alloc(self.h_output.nbytes)
         
@@ -105,7 +113,7 @@ class DepthEngine:
                 'results.mp4',
                 cv2.VideoWriter_fourcc(*'mp4v'),
                 frame_rate,
-                (3 * self._width, self._height),
+                (2 * self._width, self._height),
             )
         
         # Make results directory
@@ -118,10 +126,10 @@ class DepthEngine:
         """
         Preprocess the image
         """
-        image = image.astype(np.float32) # uint8 -> fp32 image.shape == (480, 640, 3)
-        image /= 255.0 # normalize the image 0-255 -> 0-1
-        image = self.transform({'image': image})['image'] # image.shape == (3, 364, 364)
-        image = image[None] # expand the first dimension -> image.shape == (1, 3, 364, 364)
+        image = image.astype(np.float32)
+        image /= 255.0
+        image = self.transform({'image': image})['image']
+        image = image[None]
         
         return image
     
@@ -129,15 +137,15 @@ class DepthEngine:
         """
         Postprocess the depth map
         """
-        depth = np.reshape(depth, (self.width, self.height)) # convert tensor (132496,) to image (364, 364)
-        depth = cv2.resize(depth, (self._width, self._height)) # (364, 364) -> (480, 640)
+        depth = np.reshape(depth, (self.width, self.height))
+        depth = cv2.resize(depth, (self._width, self._height))
         
         if self.raw:
             return depth # raw depth map
         else:
             depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
-            depth = depth.astype(np.uint8) # depth.shape == (480, 640)
-
+            depth = depth.astype(np.uint8)
+            
             if self.grayscale:
                 depth = cv2.cvtColor(depth, cv2.COLOR_GRAY2BGR)
             else:
@@ -149,28 +157,23 @@ class DepthEngine:
         """
         Infer depth from an image using TensorRT
         """
-        t0 = time.time()
         # Preprocess the image
-        image = self.preprocess(image) # image.shape == (1, 3, 364, 364)
-
-        t1 = time.time()
+        image = self.preprocess(image)
+        
+        t0 = time.time()
         
         # Copy the input image to the pagelocked memory
-        np.copyto(self.h_input, image.ravel()) # image.ravel() == (1, 3, 364, 364) -> (397488,)
-
+        np.copyto(self.h_input, image.ravel())
+        
         # Copy the input to the GPU, execute the inference, and copy the output back to the CPU
         cuda.memcpy_htod_async(self.d_input, self.h_input, self.cuda_stream)
         self.context.execute_async_v2(bindings=[int(self.d_input), int(self.d_output)], stream_handle=self.cuda_stream.handle)
         cuda.memcpy_dtoh_async(self.h_output, self.d_output, self.cuda_stream)
         self.cuda_stream.synchronize()
         
-        print(f"Inference time: {(time.time() - t1) * 1000:.2f}ms")
-
-        # Postprocess the depth map
-        # self.h_output.shape == (132496,)  132496 = 364 * 364
-        depth_pred = self.postprocess(self.h_output) 
-        print(f"Preprocess_Inference_Postprocess time: {(time.time() - t0) * 1000:.2f}ms")
-        return depth_pred
+        print(f"Inference time: {time.time() - t0:.4f}s")
+        
+        return self.postprocess(self.h_output) # Postprocess the depth map
     
     def run(self):
         """
@@ -178,19 +181,15 @@ class DepthEngine:
         """
         try:
             while True:
-
-                rgb, depth_gt  = self.camera.frame # rgb.shape == (480, 640, 3), depth_gt.shape == (480, 640)
-                # scale depth_gt to 0-255
-                depth_gt = (depth_gt - depth_gt.min()) / (depth_gt.max() - depth_gt.min()) * 255.0
-                depth_gt = depth_gt.astype(np.uint8)
-                depth_gt = cv2.applyColorMap(depth_gt, cv2.COLORMAP_INFERNO)
+                # frame = self.camera.frame # This causes bad performance
+                _, frame = self.camera.caps[0].read()
                 
-                # trt engine inference
-                depth_pred = self.infer(rgb)
+                depth = self.infer(frame)
+                
                 if self.raw:
-                    self.raw_depth = depth_pred
+                    self.raw_depth = depth
                 else:
-                    results = np.concatenate((rgb, depth_pred, depth_gt), axis=1)
+                    results = np.concatenate((frame, depth), axis=1)
                     
                     if self.record:
                         self.video.write(results)
@@ -199,11 +198,11 @@ class DepthEngine:
                         cv2.imwrite(str(self.save_path / f'{datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")}.png'), results)
 
                     if self.stream:
-                        cv2.imshow('RGB & DepthPred & DepthGT', results) # This causes bad performance
-                        key = cv2.waitKey(1)
-                        if key == ord('q') or key == 27:
-                            self.camera.pipeline.stop()
-                            print('realsense d435i camera pipeline stopped!')
+                        cv2.namedWindow('GT-Depth', cv2.WINDOW_NORMAL)
+                        cv2.resizeWindow('GT-Depth', 800, 600)
+                        cv2.imshow('GT-Depth', results) # This causes bad performance
+                        
+                        if cv2.waitKey(1) == ord('q'):
                             break
         except Exception as e:
             print(e)
@@ -215,18 +214,20 @@ class DepthEngine:
                 cv2.destroyAllWindows()
             
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--trt_engine_path', type=str, default='./exprted_models/depth_anything_vits14_364.trt', help='path to the TensorRT engine')
-    parser.add_argument('--frame_rate', type=int, default=30, help='Frame rate of the camera')
-    parser.add_argument('--raw', action='store_true', help='Use only the raw depth map')
-    parser.add_argument('--stream', action='store_true', help='Stream the results')
-    parser.add_argument('--record', action='store_true', help='Record the results')
-    parser.add_argument('--save', action='store_true', help='Save the results')
-    parser.add_argument('--grayscale', action='store_true', help='Convert the depth map to grayscale')
-    args = parser.parse_args()
+    args = argparse.ArgumentParser()
+    args.add_argument('--sensor_id', type=int, default=1, help='camera id')
+    args.add_argument('--camera_type', type=str, default='usb', help='camera type: usb or csi')
+    args.add_argument('--frame_rate', type=int, default=15, help='Frame rate of the camera')
+    args.add_argument('--raw', action='store_true', help='Use only the raw depth map')
+    args.add_argument('--stream', action='store_true', help='Stream the results')
+    args.add_argument('--record', action='store_true', help='Record the results')
+    args.add_argument('--save', action='store_true', help='Save the results')
+    args.add_argument('--grayscale', action='store_true', help='Convert the depth map to grayscale')
+    args = args.parse_args()
     
     depth = DepthEngine(
-        trt_engine_path=args.trt_engine_path,
+        sensor_id=args.sensor_id,
+        camera_type=args.camera_type,
         frame_rate=args.frame_rate,
         raw=args.raw,
         stream=args.stream, 
